@@ -1,0 +1,6 @@
+bin/
+dist/
+/vaultless
+*.exe
+.vaultless/secrets.db
+.vaultless/audit.log
