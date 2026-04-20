@@ -46,7 +46,8 @@ type ResolvedConfig struct {
 	UserEmail string
 
 	// Audit
-	AuditEnabled bool
+	AuditEnabled    bool
+	AuditMaxEntries int
 }
 
 // GlobalFlags mirrors the CLI global flags for config resolution.

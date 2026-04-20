@@ -86,6 +86,24 @@ func (db *DB) IntegrityCheck(ctx context.Context) (string, error) {
 	return result, nil
 }
 
+// WithTx executes fn within a transaction, committing on success or rolling back on error.
+func (db *DB) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return &models.ErrDatabase{Msg: "failed to begin transaction", Err: err}
+	}
+
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return &models.ErrDatabase{Msg: "failed to commit transaction", Err: err}
+	}
+	return nil
+}
+
 func (db *DB) migrate() error {
 	_, err := db.conn.Exec(`
 		CREATE TABLE IF NOT EXISTS _migrations (

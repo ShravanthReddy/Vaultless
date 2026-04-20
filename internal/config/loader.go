@@ -85,6 +85,7 @@ func mergeProjectConfig(cfg *ResolvedConfig) {
 		cfg.MaxValueSize = pc.Secrets.MaxValueSize
 	}
 	cfg.AuditEnabled = pc.Audit.Enabled
+	cfg.AuditMaxEntries = pc.Audit.MaxEntries
 }
 
 // SaveProjectConfig writes the project config to .vaultless/config.toml.

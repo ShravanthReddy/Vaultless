@@ -32,7 +32,7 @@ Vaultless is an **offline-first, zero-dependency secrets management CLI** that r
 | `.env` files committed to Git | Secrets stored in encrypted SQLite, never plaintext on disk |
 | Cloud vault vendor lock-in | Fully local, optional sync via Git or filesystem |
 | Heavy infrastructure (Vault, AWS SM) | Single 14 MB binary, zero setup |
-| No audit trail for `.env` changes | HMAC-signed NDJSON audit log with tamper detection |
+| No audit trail for `.env` changes | Encrypted NDJSON audit log with HMAC tamper detection (encrypt-then-MAC) |
 | No environment separation in `.env` | First-class environment support (dev/staging/prod) |
 | Sharing secrets over Slack/email | Encrypted team invite bundles with passphrase |
 
@@ -43,7 +43,7 @@ Vaultless is an **offline-first, zero-dependency secrets management CLI** that r
 - **Envelope encryption** — 3-level key hierarchy (master key &rarr; project key &rarr; per-secret DEK via AES-256-GCM nonces).
 - **Pure Go / No CGo** — Cross-compiles to Linux, macOS, Windows (amd64/arm64) with no native dependencies. Uses `modernc.org/sqlite`.
 - **Version history & rollback** — Every secret change is versioned. Roll back to any prior version.
-- **HMAC-signed audit logs** — Every operation is recorded and cryptographically tamper-evident.
+- **Encrypted audit logs** — Every operation is encrypted (AES-256-GCM) and HMAC-signed (encrypt-then-MAC) for confidentiality and tamper evidence.
 - **CI/CD tokens** — Scoped, expirable tokens for non-interactive access (read-only or read-write).
 
 ### Target Users
@@ -104,7 +104,7 @@ graph TB
     subgraph "Sync Layer"
         SyncBackend["SyncBackend Interface"]
         GitBackend["Git Backend"]
-        FSBackend["Filesystem Backend"]
+        FSBackend["Filesystem Backend<br/>flock: LOCK_EX/LOCK_SH"]
     end
 
     CLI --> SecSvc & EnvSvc & AuditSvc & TeamSvc & TokenSvc & RunSvc & SyncSvc & BackupSvc & DoctorSvc & ImportSvc & ExportSvc
@@ -284,13 +284,19 @@ graph LR
         Snap["VLTSNAP binary format<br/>magic(7) ‖ version(1) ‖ env(var)<br/>‖ timestamp(8) ‖ version(8)<br/>‖ count(4) ‖ entries..."]
     end
 
+    subgraph "Conflict Detection"
+        HashCheck["Compare remote_hash<br/>vs local_hash<br/>(sync_state table)"]
+    end
+
     subgraph "Backends"
         Git["Git Backend<br/>(.vaultless-sync/ repo)"]
-        FS["Filesystem Backend<br/>(shared directory)"]
+        FS["Filesystem Backend<br/>(shared directory)<br/>flock: LOCK_EX push / LOCK_SH pull"]
     end
 
     DB -->|"ListDecrypted"| SyncSvc
     SyncSvc -->|"EncodeSnapshot"| Snap
+    SyncSvc -->|"Hash Compare"| HashCheck
+    HashCheck -->|"Abort if mismatch<br/>(--force to override)"| SyncSvc
     Snap -->|"Push"| Git
     Snap -->|"Push"| FS
     Git -->|"Pull"| Snap
@@ -314,25 +320,23 @@ sequenceDiagram
     Cmd->>Svc: Any mutating operation
     Svc->>AW: Log(AuditEntry)
     AW->>AW: Set ID = UUID, Timestamp = now
-    AW->>AW: Set HMAC = "" (empty for signing)
     AW->>AW: JSON.Marshal(entry)
-    AW->>HMAC: ComputeHMAC(auditHMACKey, jsonBytes)
-    Note over HMAC: auditHMACKey = HKDF-SHA256(projectKey,<br/>"vaultless-audit-hmac-v1")
+    AW->>AW: AES-256-GCM encrypt(projectKey, jsonBytes) → ciphertext
+    AW->>HMAC: ComputeHMAC(auditHMACKey, ciphertext)
+    Note over HMAC: Encrypt-then-MAC: HMAC over ciphertext<br/>auditHMACKey = HKDF-SHA256(projectKey,<br/>"vaultless-audit-hmac-v1")
     HMAC-->>AW: base64(HMAC-SHA256)
-    AW->>AW: entry.HMAC = computed value
-    AW->>File: Append JSON line + newline
+    AW->>File: Append NDJSON line (ciphertext + HMAC) + newline
     Note over File: Advisory flock(LOCK_EX)<br/>prevents concurrent corruption
 
     Note over Cmd,File: === VERIFICATION ===
     Cmd->>AW: Verify()
     AW->>File: Read all lines
     loop Each entry
-        AW->>AW: storedHMAC = entry.HMAC
-        AW->>AW: entry.HMAC = ""
-        AW->>AW: JSON.Marshal(entry)
-        AW->>HMAC: VerifyHMAC(key, data, storedHMAC)
+        AW->>AW: Detect format (encrypted or legacy plaintext)
+        AW->>HMAC: VerifyHMAC(auditHMACKey, ciphertext)
         Note over HMAC: hmac.Equal() — constant time
         HMAC-->>AW: valid/invalid
+        AW->>AW: Decrypt ciphertext if needed
     end
     AW-->>Cmd: (validCount, invalidCount)
 ```
@@ -348,9 +352,9 @@ sequenceDiagram
 | **Disk theft / forensic recovery** | All secrets encrypted with AES-256-GCM. Project key encrypted by master key. Plaintext never written to disk. |
 | **Brute-force master password** | Argon2id with 64 MB memory, 3 iterations — expensive to parallelize on GPUs/ASICs. |
 | **Memory dump / core dump** | Core dumps disabled at startup (`RLIMIT_CORE = 0`). Sensitive buffers zeroed after use via `ZeroBytes()`. `umask(0077)` enforced. |
-| **Audit log tampering** | Each entry HMAC-SHA256 signed. Verification detects any modification, deletion, or insertion. |
+| **Audit log tampering** | Each entry encrypted with AES-256-GCM and signed with HMAC-SHA256 over the ciphertext (encrypt-then-MAC). Verification detects any modification, deletion, or insertion. |
 | **Man-in-the-middle (team sync)** | Invite bundles encrypted with Argon2id-derived key from passphrase. Passphrase shared out-of-band. |
-| **Token theft (CI/CD)** | Tokens stored as SHA-256 hashes. Scoped permissions (read-only/read-write). Expirable. Revocable. |
+| **Token theft (CI/CD)** | Tokens stored as SHA-256 hashes. Scoped permissions (read-only/read-write). Expirable. `is_revoked` flag in `tokens` table enables immediate revocation; `Validate()` checks revocation status before returning and returns 401 if revoked. |
 | **Compromised sync remote** | Sync snapshots contain already-encrypted data. Compromise of Git remote does not expose plaintext. |
 | **Swap / temp file leakage** | Temp `.env` files written with `0600` permissions and cleaned up on exit/signal. |
 | **Dependency supply chain** | Pure Go, no CGo. Minimal dependency tree. SBOM generated for releases. |
@@ -410,7 +414,7 @@ Master Password (user memory only, never persisted)
 2. **Protection:** Project key encrypted by master key, stored in `~/.vaultless/keys/<id>.key`
 3. **Caching:** Master key cached in OS keychain (or encrypted fallback file) with 24h TTL
 4. **Team sharing:** Project key shared via Argon2id-encrypted invite bundle
-5. **Rotation:** Store new encrypted project key file; re-encrypt all secrets (planned for v1.1)
+5. **Rotation:** `RotateProjectKey()` generates a fresh 256-bit project key, re-encrypts all secrets under the new key within a transaction, pushes a signed rotation event to the sync backend, and distributes the new key to team members via invite bundles. A version history of key rotations is maintained for auditability.
 
 ### 3.4 Argon2id Key Derivation
 
@@ -434,13 +438,14 @@ The master password is never stored — it is transformed into a master key usin
 
 ### 3.5 HMAC Signing (Audit Integrity)
 
-Every audit log entry is signed with **HMAC-SHA256**:
+Audit log entries use an **encrypt-then-MAC** scheme: each entry is first encrypted with **AES-256-GCM** using the project key, then an **HMAC-SHA256** is computed over the ciphertext. This provides both confidentiality (entries are not readable without the project key) and tamper evidence (the HMAC detects any modification). The reader is backwards compatible with legacy plaintext entries.
 
 ```
 auditHMACKey = HKDF-SHA256(projectKey, info="vaultless-audit-hmac-v1")
-entryJSON    = JSON.Marshal(entry with hmac="")
-signature    = HMAC-SHA256(auditHMACKey, entryJSON)
-entry.hmac   = base64(signature)
+entryJSON    = JSON.Marshal(entry)
+ciphertext   = AES-256-GCM(projectKey, entryJSON)
+signature    = HMAC-SHA256(auditHMACKey, ciphertext)
+output       = NDJSON line with ciphertext + base64(signature)
 ```
 
 **Verification** uses `crypto/hmac.Equal()` for constant-time comparison, preventing timing attacks.
@@ -492,7 +497,7 @@ Where `machine-id` comes from `/etc/machine-id` (Linux) or hostname as fallback.
 | Verification token | `.vaultless/config.toml` `[auth].verification` | AES-256-GCM | Master key |
 | Session/master key cache | OS keychain or `~/.vaultless/sessions/` | OS keychain or AES-256-GCM | OS-managed or machine key |
 | Team invite bundle | Transmitted out-of-band (base64 string) | AES-256-GCM | Argon2id(passphrase) |
-| Audit log entries | `.vaultless/audit.log` (NDJSON) | **Not encrypted** — HMAC signed | Audit HMAC key |
+| Audit log entries | `.vaultless/audit.log` (NDJSON) | AES-256-GCM + HMAC over ciphertext (encrypt-then-MAC) | Project key (encryption) + Audit HMAC key (integrity) |
 | Secret key names | SQLite `secrets.key_name` | **Not encrypted** (plaintext) | — |
 | Environment names | SQLite `environments.name` | **Not encrypted** (plaintext) | — |
 | CI/CD tokens | SQLite `tokens.hashed_key` | SHA-256 hash (one-way) | — |
@@ -649,7 +654,7 @@ Immutable history of every secret change.
 | `change_type` | TEXT | NOT NULL | `created`, `updated`, `deleted`, `restored` |
 
 #### `sync_state`
-Tracks synchronization state per environment.
+Tracks synchronization state per environment. The `remote_hash` and `local_hash` columns are used for **conflict detection**: before a pull, the sync service compares these hashes and aborts with a diff if they differ, requiring the `--force` flag to override.
 
 | Column | Type | Constraints | Description |
 |---|---|---|---|
@@ -657,8 +662,8 @@ Tracks synchronization state per environment.
 | `environment_id` | TEXT | FK &rarr; environments(id), NOT NULL | Tracked environment |
 | `last_push_at` | TEXT | | Last push timestamp |
 | `last_pull_at` | TEXT | | Last pull timestamp |
-| `remote_hash` | TEXT | | Hash of last known remote state |
-| `local_hash` | TEXT | | Hash of local state at last sync |
+| `remote_hash` | TEXT | | Hash of last known remote state (used for conflict detection) |
+| `local_hash` | TEXT | | Hash of local state at last sync (compared against remote_hash before pull) |
 
 #### `tokens`
 CI/CD access tokens with scoped permissions.
@@ -765,8 +770,8 @@ Vaultless exposes **33 commands** organized into logical groups.
 
 | # | Command | Description | Implementation |
 |---|---|---|---|
-| 17 | `vaultless push` | Push local state to remote | Encodes encrypted snapshot (binary VLTSNAP format), pushes via configured backend (Git or filesystem). Updates `sync_state`. |
-| 18 | `vaultless pull` | Pull remote state to local | Pulls snapshot from backend, decodes, merges into local DB. Updates `sync_state`. |
+| 17 | `vaultless push` | Push local state to remote | Encodes encrypted snapshot (binary VLTSNAP format), pushes via configured backend (Git or filesystem). Acquires exclusive file lock (filesystem backend) to prevent concurrent write corruption. Updates `sync_state` with local hash. |
+| 18 | `vaultless pull` | Pull remote state to local | Compares `remote_hash` vs `local_hash` in `sync_state` before merging; aborts with a diff if hashes differ (use `--force` to override). Acquires shared file lock (filesystem backend). Pulls snapshot from backend, decodes, merges into local DB. Updates `sync_state`. |
 | 19 | `vaultless status` | Show sync status | Displays backend type, remote URL, last push/pull times, whether local or remote changes exist. |
 
 ### 5.8 Team Management
@@ -928,7 +933,7 @@ vaultless/
 │   └── sync/                    # Sync backend implementations
 │       ├── backend.go           # SyncBackend interface + snapshot codec
 │       ├── git.go               # Git-based sync backend
-│       └── filesystem.go        # Filesystem-based sync backend
+│       └── filesystem.go        # Filesystem-based sync backend (flock-based locking)
 │
 ├── scripts/                     # Build and utility scripts
 ├── testdata/                    # Test fixtures
@@ -1117,6 +1122,9 @@ type SecretsService struct {
 | `Verify` | `() (valid, invalid int, err error)` | Verify HMAC integrity of all entries |
 
 **Audit entry format (NDJSON):**
+
+Audit log entries are NDJSON lines encrypted with the project key using AES-256-GCM. An HMAC is computed over the ciphertext (encrypt-then-MAC), providing both confidentiality and tamper evidence. The reader is backwards compatible with legacy plaintext entries for migration purposes.
+
 ```json
 {
   "id": "uuid",
@@ -1154,9 +1162,17 @@ type SecretsService struct {
 | `Create` | `(ctx, name, permission string, expiry *time.Duration) (*TokenCreateResult, error)` | Generate `vlt_`-prefixed token, store hash |
 | `List` | `(ctx) ([]Token, error)` | List all tokens with status |
 | `Revoke` | `(ctx, name string) error` | Revoke by name |
-| `Verify` | `(ctx, key string) (*Token, error)` | Verify token key against stored hash |
+| `Verify` | `(ctx, key string) (*Token, error)` | Verify token key against stored hash. Checks the `is_revoked` flag before returning; returns a 401 error if the token has been revoked. |
 
 **Token format:** `vlt_` + 64 hex characters (32 random bytes).
+
+**Token validation flow:**
+1. Hash the provided token key with SHA-256
+2. Look up the matching record in the `tokens` table
+3. Check `is_revoked` — if set, return 401 (unauthorized)
+4. Check `expires_at` — if expired, return 401
+5. Update `last_used_at` timestamp
+6. Return the token with its scoped permissions
 
 ### 8.6 Runner
 
@@ -1189,8 +1205,8 @@ type RunOptions struct {
 
 | Method | Signature | Description |
 |---|---|---|
-| `Push` | `(ctx, envName string, force bool) error` | Encode + push snapshot |
-| `Pull` | `(ctx, envName string, force bool) error` | Pull + decode + merge snapshot |
+| `Push` | `(ctx, envName string, force bool) error` | Encode + push snapshot. Acquires exclusive lock (`LOCK_EX`) on filesystem backend to prevent concurrent write corruption. Updates local hash in `sync_state`. |
+| `Pull` | `(ctx, envName string, force bool) error` | Pull + decode + merge snapshot. Before merging, compares `remote_hash` against `local_hash` in `sync_state`; aborts with a diff if they differ unless `force` is true. Acquires shared lock (`LOCK_SH`) on filesystem backend. |
 
 ### 8.8 Importer / Exporter
 
@@ -1238,7 +1254,7 @@ type RunOptions struct {
 
 Tests follow Go conventions — `_test.go` files alongside the code they test:
 
-**Current Coverage: 37.1% overall, 25 test files**
+**Current Coverage: 42.4% overall, core packages 60–80%**
 
 | Package | Coverage | Test Files |
 |---------|----------|------------|
@@ -1338,7 +1354,6 @@ go tool cover -html=coverage.out
 
 | Feature | Description |
 |---|---|
-| **Key rotation** | Rotate project key and re-encrypt all secrets |
 | **Secret references** | `${OTHER_KEY}` syntax for composable secrets |
 | **Conflict resolution UI** | Interactive merge for sync conflicts |
 | **Watch mode** | `vaultless run --watch` — restart on secret change |
@@ -1370,7 +1385,7 @@ go tool cover -html=coverage.out
 |---|---|
 | Key names are not encrypted | Use non-descriptive key names if key names are sensitive |
 | Environment names are not encrypted | Use generic environment names |
-| No key rotation without re-init | Planned for v1.1 |
+| Key rotation requires re-encrypting all secrets | `RotateProjectKey()` handles this atomically, but is proportional to secret count |
 | Single master password per project | Each team member uses their own master password (project key is shared) |
 | Audit log is append-only, no compaction | Manually archive old entries |
 | No real-time sync | Use `push`/`pull` manually or in CI/CD |

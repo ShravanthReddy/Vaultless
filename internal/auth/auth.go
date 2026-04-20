@@ -82,6 +82,12 @@ func (a *TokenAuth) Authenticate(ctx context.Context) (*Identity, error) {
 	}, nil
 }
 
+// Validate checks if a token is valid (not revoked, not expired) and returns the identity.
+// This is a standalone validation method that should be called before any token-authenticated operation.
+func (a *TokenAuth) Validate(ctx context.Context) (*Identity, error) {
+	return a.Authenticate(ctx)
+}
+
 // PasswordAuth authenticates via master password.
 type PasswordAuth struct {
 	cfg *config.ResolvedConfig
