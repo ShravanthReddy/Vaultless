@@ -104,7 +104,7 @@ graph TB
     subgraph "Sync Layer"
         SyncBackend["SyncBackend Interface"]
         GitBackend["Git Backend"]
-        FSBackend["Filesystem Backend<br/>flock: LOCK_EX/LOCK_SH"]
+        FSBackend["Filesystem Backend<br/>syscall.Flock: LOCK_EX/LOCK_SH"]
     end
 
     CLI --> SecSvc & EnvSvc & AuditSvc & TeamSvc & TokenSvc & RunSvc & SyncSvc & BackupSvc & DoctorSvc & ImportSvc & ExportSvc
@@ -290,7 +290,7 @@ graph LR
 
     subgraph "Backends"
         Git["Git Backend<br/>(.vaultless-sync/ repo)"]
-        FS["Filesystem Backend<br/>(shared directory)<br/>flock: LOCK_EX push / LOCK_SH pull"]
+        FS["Filesystem Backend<br/>(shared directory)<br/>syscall.Flock: LOCK_EX push / LOCK_SH pull"]
     end
 
     DB -->|"ListDecrypted"| SyncSvc
@@ -770,8 +770,8 @@ Vaultless exposes **33 commands** organized into logical groups.
 
 | # | Command | Description | Implementation |
 |---|---|---|---|
-| 17 | `vaultless push` | Push local state to remote | Encodes encrypted snapshot (binary VLTSNAP format), pushes via configured backend (Git or filesystem). Acquires exclusive file lock (filesystem backend) to prevent concurrent write corruption. Updates `sync_state` with local hash. |
-| 18 | `vaultless pull` | Pull remote state to local | Compares `remote_hash` vs `local_hash` in `sync_state` before merging; aborts with a diff if hashes differ (use `--force` to override). Acquires shared file lock (filesystem backend). Pulls snapshot from backend, decodes, merges into local DB. Updates `sync_state`. |
+| 17 | `vaultless push` | Push local state to remote | Encodes encrypted snapshot (binary VLTSNAP format), pushes via configured backend (Git or filesystem). Acquires exclusive file lock (`LOCK_EX` via `syscall.Flock`) on filesystem backend to prevent concurrent write corruption. Updates `sync_state` with local hash. |
+| 18 | `vaultless pull` | Pull remote state to local | Compares `remote_hash` vs `local_hash` in `sync_state` before merging; aborts with a diff if hashes differ (use `--force` to override). Acquires shared file lock (`LOCK_SH` via `syscall.Flock`) on filesystem backend. Pulls snapshot from backend, decodes, merges into local DB. Updates `sync_state`. |
 | 19 | `vaultless status` | Show sync status | Displays backend type, remote URL, last push/pull times, whether local or remote changes exist. |
 
 ### 5.8 Team Management
@@ -933,7 +933,7 @@ vaultless/
 │   └── sync/                    # Sync backend implementations
 │       ├── backend.go           # SyncBackend interface + snapshot codec
 │       ├── git.go               # Git-based sync backend
-│       └── filesystem.go        # Filesystem-based sync backend (flock-based locking)
+│       └── filesystem.go        # Filesystem-based sync backend (syscall.Flock locking)
 │
 ├── scripts/                     # Build and utility scripts
 ├── testdata/                    # Test fixtures
@@ -1205,8 +1205,8 @@ type RunOptions struct {
 
 | Method | Signature | Description |
 |---|---|---|
-| `Push` | `(ctx, envName string, force bool) error` | Encode + push snapshot. Acquires exclusive lock (`LOCK_EX`) on filesystem backend to prevent concurrent write corruption. Updates local hash in `sync_state`. |
-| `Pull` | `(ctx, envName string, force bool) error` | Pull + decode + merge snapshot. Before merging, compares `remote_hash` against `local_hash` in `sync_state`; aborts with a diff if they differ unless `force` is true. Acquires shared lock (`LOCK_SH`) on filesystem backend. |
+| `Push` | `(ctx, envName string, force bool) error` | Encode + push snapshot. Acquires exclusive lock (`LOCK_EX` via `syscall.Flock`) on filesystem backend to prevent concurrent write corruption. Updates local hash in `sync_state`. |
+| `Pull` | `(ctx, envName string, force bool) error` | Pull + decode + merge snapshot. Before merging, compares `remote_hash` against `local_hash` in `sync_state`; aborts with a diff if they differ unless `force` is true. Acquires shared lock (`LOCK_SH` via `syscall.Flock`) on filesystem backend. |
 
 ### 8.8 Importer / Exporter
 
