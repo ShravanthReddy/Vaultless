@@ -70,11 +70,11 @@ func TestSecretsService_SetAndGet(t *testing.T) {
 	if string(result.Value) != "secret-value-123" {
 		t.Fatalf("expected 'secret-value-123', got %q", result.Value)
 	}
-	if result.KeyName != "API_KEY" {
-		t.Fatalf("expected key 'API_KEY', got %q", result.KeyName)
+	if result.KeyName() != "API_KEY" {
+		t.Fatalf("expected key 'API_KEY', got %q", result.KeyName())
 	}
-	if result.Version != 1 {
-		t.Fatalf("expected version 1, got %d", result.Version)
+	if result.Version() != 1 {
+		t.Fatalf("expected version 1, got %d", result.Version())
 	}
 }
 
@@ -410,8 +410,8 @@ func TestSecretsService_Rollback(t *testing.T) {
 		t.Fatalf("expected 'v1-data' after rollback, got %q", after.Value)
 	}
 	// Version should be 3 (new version created by rollback)
-	if after.Version != 3 {
-		t.Fatalf("expected version 3 after rollback, got %d", after.Version)
+	if after.Version() != 3 {
+		t.Fatalf("expected version 3 after rollback, got %d", after.Version())
 	}
 
 	// History should show the restore

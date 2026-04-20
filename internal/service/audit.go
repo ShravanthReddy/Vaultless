@@ -146,16 +146,56 @@ func (w *AuditWriter) Query(q *AuditQuery) ([]models.AuditEntry, error) {
 // Verify checks the HMAC integrity of all entries.
 // Returns (valid count, invalid count, error).
 func (w *AuditWriter) Verify() (int, int, error) {
-	entries, err := w.readAll()
+	f, err := os.Open(w.path)
 	if err != nil {
-		return 0, 0, err
+		if os.IsNotExist(err) {
+			return 0, 0, nil
+		}
+		return 0, 0, fmt.Errorf("failed to open audit log: %w", err)
 	}
+	defer f.Close()
 
 	var valid, invalid int
-	for _, e := range entries {
-		savedHMAC := e.HMAC
-		e.HMAC = ""
-		jsonBytes, err := json.Marshal(&e)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		var entry models.AuditEntry
+		if len(line) > len(auditMagicEncrypted) && line[:len(auditMagicEncrypted)] == auditMagicEncrypted {
+			hexData := line[len(auditMagicEncrypted):]
+			data, err := hexDecode(hexData)
+			if err != nil {
+				invalid++
+				continue
+			}
+			if len(data) < crypto.NonceSize {
+				invalid++
+				continue
+			}
+			nonce := data[:crypto.NonceSize]
+			ciphertext := data[crypto.NonceSize:]
+			plaintext, err := crypto.Decrypt(w.projectKey, ciphertext, nonce)
+			if err != nil {
+				invalid++
+				continue
+			}
+			if err := json.Unmarshal(plaintext, &entry); err != nil {
+				invalid++
+				continue
+			}
+		} else {
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				invalid++
+				continue
+			}
+		}
+
+		savedHMAC := entry.HMAC
+		entry.HMAC = ""
+		jsonBytes, err := json.Marshal(&entry)
 		if err != nil {
 			invalid++
 			continue
@@ -165,6 +205,10 @@ func (w *AuditWriter) Verify() (int, int, error) {
 		} else {
 			invalid++
 		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return valid, invalid, fmt.Errorf("failed to read audit log: %w", err)
 	}
 	return valid, invalid, nil
 }

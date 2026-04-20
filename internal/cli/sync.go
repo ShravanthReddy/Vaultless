@@ -6,6 +6,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vaultless/vaultless/internal/models"
@@ -117,10 +118,10 @@ func newStatusCmd(gf *GlobalFlags) *cobra.Command {
 				tbl.AddRow("Remote", status.Remote)
 			}
 			if status.LastPushAt != nil {
-				tbl.AddRow("Last Push", *status.LastPushAt)
+				tbl.AddRow("Last Push", status.LastPushAt.Format(time.RFC3339))
 			}
 			if status.LastPullAt != nil {
-				tbl.AddRow("Last Pull", *status.LastPullAt)
+				tbl.AddRow("Last Pull", status.LastPullAt.Format(time.RFC3339))
 			}
 			if status.HasLocalChanges {
 				tbl.AddRow("Local Changes", "yes (not pushed)")

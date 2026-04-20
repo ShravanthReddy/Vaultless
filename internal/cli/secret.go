@@ -58,7 +58,7 @@ func newSetCmd(gf *GlobalFlags) *cobra.Command {
 			if !ac.cfg.Force {
 				existing, _ := svc.Get(newContext(), ac.cfg.ActiveEnv, keyName)
 				if existing != nil {
-					confirmed, err := output.PromptConfirm(fmt.Sprintf("Secret '%s' already exists (v%d). Overwrite?", keyName, existing.Version))
+					confirmed, err := output.PromptConfirm(fmt.Sprintf("Secret '%s' already exists (v%d). Overwrite?", keyName, existing.Version()))
 					if err != nil || !confirmed {
 						ac.formatter.Println("Aborted.")
 						return nil
@@ -133,8 +133,8 @@ func newGetCmd(gf *GlobalFlags) *cobra.Command {
 					"key":         result.KeyName,
 					"value":       string(result.Value),
 					"environment": ac.cfg.ActiveEnv,
-					"created_at":  result.CreatedAt.Format(time.RFC3339),
-					"updated_at":  result.UpdatedAt.Format(time.RFC3339),
+					"created_at":  result.CreatedAt().Format(time.RFC3339),
+					"updated_at":  result.UpdatedAt().Format(time.RFC3339),
 					"version":     result.Version,
 				}
 				enc := json.NewEncoder(os.Stdout)

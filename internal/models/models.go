@@ -187,20 +187,20 @@ var (
 
 func ValidateKeyName(k string) error {
 	if len(k) < 1 {
-		return fmt.Errorf("key name must not be empty")
+		return &ErrValidation{Field: "key_name", Message: "key name must not be empty"}
 	}
 	if !keyNameRe.MatchString(k) {
-		return fmt.Errorf("key name %q must start with uppercase letter and contain only A-Z, 0-9, _", k)
+		return &ErrValidation{Field: "key_name", Message: fmt.Sprintf("key name %q must start with uppercase letter and contain only A-Z, 0-9, _", k)}
 	}
 	return nil
 }
 
 func ValidateEnvName(n string) error {
 	if len(n) < 1 {
-		return fmt.Errorf("environment name must not be empty")
+		return &ErrValidation{Field: "env_name", Message: "environment name must not be empty"}
 	}
 	if !envNameRe.MatchString(n) {
-		return fmt.Errorf("environment name %q must start with lowercase letter and contain only a-z, 0-9, -", n)
+		return &ErrValidation{Field: "env_name", Message: fmt.Sprintf("environment name %q must start with lowercase letter and contain only a-z, 0-9, -", n)}
 	}
 	return nil
 }

@@ -16,7 +16,16 @@ import (
 	"github.com/vaultless/vaultless/internal/models"
 )
 
-func testSyncSetup(t *testing.T) (*SyncService, context.Context) {
+// mockBackend implements syncpkg.SyncBackend for testing.
+type mockBackend struct {
+	hash string
+}
+
+func (m *mockBackend) Push(data []byte) error  { return nil }
+func (m *mockBackend) Pull() ([]byte, error)   { return nil, nil }
+func (m *mockBackend) Hash() (string, error)   { return m.hash, nil }
+
+func testSyncSetup(t *testing.T) (*SyncService, *mockBackend, context.Context) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	database, err := db.Open(filepath.Join(tmpDir, "test.db"))
@@ -45,14 +54,16 @@ func testSyncSetup(t *testing.T) (*SyncService, context.Context) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	svc := NewSyncService(database, projectID)
-	return svc, ctx
+	backend := &mockBackend{hash: "default-hash"}
+	svc := NewSyncService(database, nil, backend, projectID)
+	return svc, backend, ctx
 }
 
 func TestSyncService_Push_FirstPush(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
+	backend.hash = "hash-abc123"
 
-	err := svc.Push(ctx, "dev", "hash-abc123", false)
+	err := svc.Push(ctx, "dev", false)
 	if err != nil {
 		t.Fatalf("Push: %v", err)
 	}
@@ -76,9 +87,10 @@ func TestSyncService_Push_FirstPush(t *testing.T) {
 }
 
 func TestSyncService_Pull_FirstPull(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
+	backend.hash = "hash-remote1"
 
-	err := svc.Pull(ctx, "dev", "hash-remote1", false)
+	err := svc.Pull(ctx, "dev", false)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -99,10 +111,11 @@ func TestSyncService_Pull_FirstPull(t *testing.T) {
 }
 
 func TestSyncService_Pull_ConflictDetected(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
 
 	// Push first to establish state
-	if err := svc.Push(ctx, "dev", "hash-local1", false); err != nil {
+	backend.hash = "hash-local1"
+	if err := svc.Push(ctx, "dev", false); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
@@ -118,7 +131,8 @@ func TestSyncService_Pull_ConflictDetected(t *testing.T) {
 	}
 
 	// Pull without force should detect conflict
-	err = svc.Pull(ctx, "dev", "hash-new-remote", false)
+	backend.hash = "hash-new-remote"
+	err = svc.Pull(ctx, "dev", false)
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -133,10 +147,11 @@ func TestSyncService_Pull_ConflictDetected(t *testing.T) {
 }
 
 func TestSyncService_Pull_ConflictForceOverride(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
 
 	// Setup conflicting state
-	if err := svc.Push(ctx, "dev", "hash-local1", false); err != nil {
+	backend.hash = "hash-local1"
+	if err := svc.Push(ctx, "dev", false); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	state, _ := svc.GetState(ctx, "dev")
@@ -147,7 +162,8 @@ func TestSyncService_Pull_ConflictForceOverride(t *testing.T) {
 	})
 
 	// Pull with force should succeed
-	err := svc.Pull(ctx, "dev", "hash-forced", true)
+	backend.hash = "hash-forced"
+	err := svc.Pull(ctx, "dev", true)
 	if err != nil {
 		t.Fatalf("Pull with force: %v", err)
 	}
@@ -159,10 +175,11 @@ func TestSyncService_Pull_ConflictForceOverride(t *testing.T) {
 }
 
 func TestSyncService_Push_ConflictDetected(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
 
 	// Setup conflicting state
-	if err := svc.Push(ctx, "dev", "hash-initial", false); err != nil {
+	backend.hash = "hash-initial"
+	if err := svc.Push(ctx, "dev", false); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	state, _ := svc.GetState(ctx, "dev")
@@ -173,7 +190,8 @@ func TestSyncService_Push_ConflictDetected(t *testing.T) {
 	})
 
 	// Push without force should detect conflict
-	err := svc.Push(ctx, "dev", "hash-new-local", false)
+	backend.hash = "hash-new-local"
+	err := svc.Push(ctx, "dev", false)
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -184,10 +202,11 @@ func TestSyncService_Push_ConflictDetected(t *testing.T) {
 }
 
 func TestSyncService_Push_ConflictForceOverride(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, backend, ctx := testSyncSetup(t)
 
 	// Setup conflicting state
-	if err := svc.Push(ctx, "dev", "hash-initial", false); err != nil {
+	backend.hash = "hash-initial"
+	if err := svc.Push(ctx, "dev", false); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 	state, _ := svc.GetState(ctx, "dev")
@@ -198,16 +217,17 @@ func TestSyncService_Push_ConflictForceOverride(t *testing.T) {
 	})
 
 	// Push with force should succeed
-	err := svc.Push(ctx, "dev", "hash-forced", true)
+	backend.hash = "hash-forced"
+	err := svc.Push(ctx, "dev", true)
 	if err != nil {
 		t.Fatalf("Push with force: %v", err)
 	}
 }
 
 func TestSyncService_NonexistentEnv(t *testing.T) {
-	svc, ctx := testSyncSetup(t)
+	svc, _, ctx := testSyncSetup(t)
 
-	err := svc.Pull(ctx, "nonexistent", "hash", false)
+	err := svc.Pull(ctx, "nonexistent", false)
 	if err == nil {
 		t.Fatal("expected error for nonexistent env")
 	}
